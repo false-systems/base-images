@@ -15,8 +15,9 @@
 # computes the index that would be pushed, and it must hold exactly one
 # linux/amd64 and one linux/arm64 image plus an attestation manifest (SBOM +
 # provenance) for each. Only when every target passes does any tag move, so a
-# bad index is never published and rust-builder and its -ebpf tag move
-# together. After tagging, the pushed index is inspected and checked again.
+# bad index is never published, and a failed check of rust-ebpf also keeps
+# rust-builder's tag where it was. After tagging, the pushed index is
+# inspected and checked again.
 #
 # PUBLISH_DAY overrides the date and PUBLISH_TARGETS the targets or groups (CI
 # publishes one group per job; tests and manual re-runs narrow it further).

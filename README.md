@@ -110,9 +110,10 @@ elixir-builder 0.5 GB.
   image, and an attestation manifest for each, holding an SPDX SBOM and SLSA
   provenance (`mode=max`). `ci/publish.sh` computes each index with
   `imagetools create --dry-run` and checks it **before any tag moves**, so an
-  index that lacks any of them is never tagged. `rust-builder:<v>` and
-  `rust-builder:<v>-ebpf` move together or not at all. After tagging, it
-  inspects the pushed index and checks it again.
+  index that lacks any of them is never tagged. All of a group's indexes are
+  checked first, so a failed check moves neither `rust-builder:<v>` nor
+  `rust-builder:<v>-ebpf`. After tagging, it inspects the pushed index and
+  checks it again.
 
 ## Using them in a product Dockerfile
 
