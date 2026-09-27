@@ -7,14 +7,18 @@ name: Build
 #   build    bake --load -> ci/smoke.sh -> ci/scan.sh (Trivy gate) -> push by
 #            digest with SBOM + max provenance. Nothing is pushed unless the
 #            smoke test and the scan pass.
-#   publish  ci/publish.sh: imagetools create <tag> + <tag>-YYYYMMDD, verified.
+#   publish  ci/publish.sh, one job per group: checks the merged index with
+#            imagetools create --dry-run, then tags <tag> + <tag>-YYYYMMDD.
 #
 # Pull requests (Dependabot's included) run build without pushing.
 #
 # SAFETY: every job runs on a GitHub-hosted runner. Never add a self-hosted
-# label here. This repository is public: a pull request from anyone could
-# otherwise run code on the org's own machines, and its logs are public, so no
-# step may print or use a secret beyond the GITHUB_TOKEN login below.
+# label here. This repository is public, and a pull request runs its own copy
+# of this file. The org-level guard is the runner group setting: the Default
+# group (the only one) has "Allow public repositories" off since 2026-09-27,
+# so a self-hosted label here would only queue forever. Keep it that way; see
+# README.md, "Safety". The logs are public too, so no step may print or use a
+# secret beyond the GITHUB_TOKEN login below.
 
 on:
   push:
@@ -26,17 +30,15 @@ on:
       - "docker-bake.hcl"
       - "ci/**"
       - ".github/workflows/build.yml"
+  # Every pull request, with no path filter, so the four build checks always
+  # report and can be required by branch protection on main.
   pull_request:
-    paths:
-      - "rust/**"
-      - "rust-ebpf/**"
-      - "elixir/**"
-      - "docker-bake.hcl"
-      - "ci/**"
-      - ".github/workflows/build.yml"
   # Monday 04:00 UTC: after Dependabot's Monday run, clear of kured's Sunday
   # window. A rebuild from the same pinned bases still takes the week's Debian
   # security fixes (`apt-get upgrade` in each Dockerfile) and moves the tags.
+  # GitHub disables this schedule after 60 days without repository activity;
+  # ci/staleness.sh, run from outside, notices (README.md, "Keeping the weekly
+  # rebuild alive").
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
@@ -62,6 +64,9 @@ jobs:
     name: ${{ matrix.group }} (linux/${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
+    # packages: write is for the main-only push steps below. A pull request
+    # from a fork, and every Dependabot pull request, gets a read-only
+    # GITHUB_TOKEN whatever this says.
     permissions:
       contents: read
       packages: write
@@ -85,10 +90,6 @@ jobs:
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
-      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
-        with:
-          version: v0.74.0
-
       # No layer cache on purpose: every build starts from the pinned bases,
       # so it always carries the current Debian packages, and a stale cached
       # `apt-get upgrade` layer can never be what Trivy passes.
@@ -102,6 +103,8 @@ jobs:
       - name: Smoke test
         run: ci/smoke.sh "$GROUP"
 
+      # Trivy runs from its digest-pinned image (ci/scan.sh), the same one a
+      # local run uses.
       - name: Scan (report HIGH/CRITICAL, fail on fixable CRITICAL)
         run: ci/scan.sh "$GROUP"
 
@@ -146,15 +149,24 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # One job per group, so a failure in one group (a new fixable CRITICAL, a
+  # hexpm outage) does not hold back the other group's weekly rebuild. A group
+  # publishes only if both of its architectures uploaded digests, and a build
+  # job uploads only after its smoke test and scan passed; ci/publish.sh fails
+  # before any tag moves when a digest is missing.
   publish:
-    name: Publish multi-arch tags
+    name: Publish ${{ matrix.group }}
     needs: build
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: ${{ !cancelled() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [rust, elixir]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -162,7 +174,7 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: digests-*
+          pattern: digests-${{ matrix.group }}-*
           path: ${{ runner.temp }}/digests
           merge-multiple: true
 
@@ -174,5 +186,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create and verify tags
+      - name: Verify and tag
+        env:
+          PUBLISH_TARGETS: ${{ matrix.group }}
         run: ci/publish.sh "${RUNNER_TEMP}/digests"

@@ -9,12 +9,18 @@
 #
 # The digests dir holds one file per image and arch, named <target>-<arch>
 # and containing the sha256 digest (written by the build job). Tags come from
-# docker-bake.hcl. After tagging, the index must hold exactly one linux/amd64
-# and one linux/arm64 image plus an attestation manifest (SBOM + provenance)
-# for each, or the job fails.
+# docker-bake.hcl.
 #
-# PUBLISH_DAY overrides the date and PUBLISH_TARGETS the targets (tests,
-# manual re-runs). BUILDX and IMAGE_REGISTRY as in ci/lib.sh.
+# Verify first, tag second. For every target, `imagetools create --dry-run`
+# computes the index that would be pushed, and it must hold exactly one
+# linux/amd64 and one linux/arm64 image plus an attestation manifest (SBOM +
+# provenance) for each. Only when every target passes does any tag move, so a
+# bad index is never published and rust-builder and its -ebpf tag move
+# together. After tagging, the pushed index is inspected and checked again.
+#
+# PUBLISH_DAY overrides the date and PUBLISH_TARGETS the targets or groups (CI
+# publishes one group per job; tests and manual re-runs narrow it further).
+# BUILDX and IMAGE_REGISTRY as in ci/lib.sh.
 set -euo pipefail
 # shellcheck source=ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -23,32 +29,58 @@ dir=${1:?usage: $0 <digests dir>}
 day=${PUBLISH_DAY:-$(date -u +%Y%m%d)}
 arches=(amd64 arm64)
 
-# PUBLISH_TARGETS narrows the run to some bake targets or groups (a manual
-# re-publish of one image, or a local test); CI publishes all of them.
 # shellcheck disable=SC2086 # deliberate word splitting of the target list
 refs="$(bake_refs ${PUBLISH_TARGETS:-default})"
 [ -n "$refs" ] || { echo "no bake targets" >&2; exit 1; }
 
-# Everything must be present before any tag moves.
-while read -r target _; do
+# Sets `sources` to <repo>@<digest> for each arch of one target.
+load_sources() {
+  local target=$1 repo=${2%:*} arch
+  sources=()
   for arch in "${arches[@]}"; do
     [ -s "${dir}/${target}-${arch}" ] || {
       echo "::error::no ${arch} digest for ${target} in ${dir}"
-      exit 1
+      return 1
+    }
+    sources+=("${repo}@$(tr -d '[:space:]' < "${dir}/${target}-${arch}")")
+  done
+}
+
+# Checks a raw image index (JSON): exactly one linux/<arch> image per arch,
+# and one attestation manifest per image.
+check_index() {
+  local what=$1 raw=$2 arch
+  for arch in "${arches[@]}"; do
+    jq -e --arg a "$arch" \
+      '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a)] | length == 1' \
+      <<< "$raw" >/dev/null || {
+      echo "::error::${what} does not hold exactly one linux/${arch} image"
+      return 1
     }
   done
+  jq -e --argjson n "${#arches[@]}" \
+    '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length == $n' \
+    <<< "$raw" >/dev/null || {
+    echo "::error::${what} is missing attestation manifests (SBOM/provenance)"
+    return 1
+  }
+}
+
+# Pass 1: every target's index is computed and checked; nothing is written.
+while read -r target tag; do
+  load_sources "$target" "$tag"
+  echo "== check ${target}: ${sources[*]}"
+  raw="$(buildx imagetools create --dry-run -t "$tag" "${sources[@]}")"
+  check_index "the index for ${tag}" "$raw"
 done <<< "$refs"
 
+# Pass 2: tag, then check what the registry now serves.
 summary "### Published" "" \
   "| Image | Moving tag | Dated tag | Index digest |" \
   "|---|---|---|---|"
 
 while read -r target tag; do
-  repo=${tag%:*}
-  sources=()
-  for arch in "${arches[@]}"; do
-    sources+=("${repo}@$(tr -d '[:space:]' < "${dir}/${target}-${arch}")")
-  done
+  load_sources "$target" "$tag"
 
   dated="${tag}-${day}"
   n=1
@@ -59,22 +91,7 @@ while read -r target tag; do
 
   echo "== ${target}: ${tag} + ${dated} <- ${sources[*]}"
   buildx imagetools create -t "$tag" -t "$dated" "${sources[@]}"
-
-  raw="$(buildx imagetools inspect --raw "$tag")"
-  for arch in "${arches[@]}"; do
-    jq -e --arg a "$arch" \
-      '[.manifests[] | select(.platform.os == "linux" and .platform.architecture == $a)] | length == 1' \
-      <<< "$raw" >/dev/null || {
-      echo "::error::${tag} does not hold exactly one linux/${arch} image"
-      exit 1
-    }
-  done
-  jq -e --argjson n "${#arches[@]}" \
-    '[.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")] | length == $n' \
-    <<< "$raw" >/dev/null || {
-    echo "::error::${tag} is missing attestation manifests (SBOM/provenance)"
-    exit 1
-  }
+  check_index "$tag" "$(buildx imagetools inspect --raw "$tag")"
 
   digest="$(buildx imagetools inspect "$tag" --format '{{json .Manifest}}' | jq -r .digest)"
   buildx imagetools inspect "$tag"

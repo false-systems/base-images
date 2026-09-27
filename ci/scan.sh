@@ -9,18 +9,28 @@
 # rebuild cannot remove them; the weekly rebuild picks up the fix once Debian
 # or the tool ships it.
 #
-# TRIVY overrides the command, e.g. to run it from a container locally:
-#   TRIVY="docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
-#          -v trivy-cache:/root/.cache aquasec/trivy:0.74.0" ci/scan.sh elixir
+# Trivy runs from its own image, pinned below by digest, with the Docker
+# socket mounted so it scans the images `bake --load` just put there. CI and a
+# laptop therefore run the same Trivy, and no setup action is needed. To move
+# it, resolve the new tag's index digest:
+#   docker buildx imagetools inspect ghcr.io/aquasecurity/trivy:<version>
+# TRIVY overrides the whole command, e.g. TRIVY=trivy for a local install.
 set -euo pipefail
 # shellcheck source=ci/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 [ $# -gt 0 ] || { echo "usage: $0 <bake target or group>..." >&2; exit 2; }
 
+TRIVY_IMAGE=ghcr.io/aquasecurity/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969
+
 trivy() {
-  # shellcheck disable=SC2086 # TRIVY may be a multi-word command.
-  ${TRIVY:-command trivy} "$@"
+  if [ -n "${TRIVY:-}" ]; then
+    # shellcheck disable=SC2086 # TRIVY may be a multi-word command.
+    ${TRIVY} "$@"
+  else
+    docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+      -v base-images-trivy-cache:/root/.cache "$TRIVY_IMAGE" "$@"
+  fi
 }
 
 refs="$(bake_refs "$@")"
