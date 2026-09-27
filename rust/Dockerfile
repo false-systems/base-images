@@ -1,12 +1,13 @@
-# syntax=docker/dockerfile:1
-#
 # ghcr.io/false-systems/rust-builder:<RUST_BUILDER_VERSION>
 #
 # The shared BUILD stage for every Rust image and binary: the pinned stable
 # toolchain, the C/C++ toolchain that -sys crates need, a cross toolchain for
 # the other Linux architecture, and the prebuilt cargo tools our Dockerfiles
 # use. It is never a runtime base: product images copy their binaries into
-# gcr.io/distroless/cc-debian13 (pinned by digest in each product repo).
+# gcr.io/distroless/cc-debian13 (pinned by digest in each product repo). This
+# image links against trixie's glibc, so its output belongs on a trixie
+# runtime, never cc-debian12 or bookworm: a product moves its runtime stage in
+# the same PR that moves it onto this image (README.md, "Runtime pairing").
 #
 # Built natively for linux/amd64 and linux/arm64 by .github/workflows/build.yml
 # and rebuilt every Monday, so `apt-get upgrade` below carries the week's
@@ -16,6 +17,10 @@
 # names the tag. The guard below fails the build if the FROM line and the tag
 # disagree, so a tag can never carry a different compiler. See README.md,
 # "Bumping Rust".
+#
+# No `# syntax=` line, on purpose: BuildKit's built-in Dockerfile frontend
+# parses this file, so both bake runs in a CI job (test, then push) see the
+# same frontend and nothing mutable is pulled to parse it.
 FROM rust:1.97.1-slim-trixie@sha256:8e8cf8f7fd54a2d23d5a743b3a03f56e26b6c774276c33fa0595111704ebb15c
 
 # The tag this image is published under. Not RUST_VERSION: the upstream image

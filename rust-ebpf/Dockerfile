@@ -1,15 +1,19 @@
-# syntax=docker/dockerfile:1
-#
 # ghcr.io/false-systems/rust-builder:<RUST_BUILDER_VERSION>-ebpf
 #
 # rust-builder plus what an aya eBPF build needs on top: the dated nightly
 # (with rust-src, for -Z build-std=core against bpfel-unknown-none) and
-# bpf-linker. For jalki and selko's Linux sensor.
+# bpf-linker. For jalki. selko's Linux sensor can use it only after it pins
+# the same nightly and bpf-linker (today it takes an unpinned nightly and
+# bpf-linker 0.11 with a system LLVM).
 #
 # The base is the rust-builder built in the SAME run: docker-bake.hcl passes
 # RUST_BUILDER=rust-builder and binds that name to the rust-builder target, so
 # the two tags always share one stable toolchain. The default below is only
 # for a standalone `docker build rust-ebpf/`.
+#
+# No `# syntax=` line, on purpose: BuildKit's built-in Dockerfile frontend
+# parses this file, so both bake runs in a CI job (test, then push) see the
+# same frontend and nothing mutable is pulled to parse it.
 ARG RUST_BUILDER=ghcr.io/false-systems/rust-builder:1.97.1
 FROM ${RUST_BUILDER}
 
