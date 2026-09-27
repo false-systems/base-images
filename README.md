@@ -176,11 +176,14 @@ together with `rust-toolchain.toml` (and Elixir with `.tool-versions`):
     directory: "/"
     schedule: { interval: weekly }
     ignore:
-      - dependency-name: "ghcr.io/false-systems/rust-builder"
+      - dependency-name: "false-systems/rust-builder"
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
-      - dependency-name: "ghcr.io/false-systems/elixir-builder"
+      - dependency-name: "false-systems/elixir-builder"
         update-types: ["version-update:semver-major", "version-update:semver-minor", "version-update:semver-patch"]
 ```
+
+Dependabot names a Docker dependency without its registry, so a
+`ghcr.io/false-systems/...` name would match nothing and ignore nothing.
 
 Keep `rust-toolchain.toml` at the image's version (`channel = "1.97.1"`). The
 image's toolchain then satisfies it, and rustup downloads nothing.
