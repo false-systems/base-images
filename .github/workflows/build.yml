@@ -1,0 +1,178 @@
+name: Build
+
+# Builds the shared builder images natively on GitHub-hosted runners (free:
+# this repository is public), one job per image group and architecture, then
+# merges each image's two architectures into one tagged multi-arch index.
+#
+#   build    bake --load -> ci/smoke.sh -> ci/scan.sh (Trivy gate) -> push by
+#            digest with SBOM + max provenance. Nothing is pushed unless the
+#            smoke test and the scan pass.
+#   publish  ci/publish.sh: imagetools create <tag> + <tag>-YYYYMMDD, verified.
+#
+# Pull requests (Dependabot's included) run build without pushing.
+#
+# SAFETY: every job runs on a GitHub-hosted runner. Never add a self-hosted
+# label here. This repository is public: a pull request from anyone could
+# otherwise run code on the org's own machines, and its logs are public, so no
+# step may print or use a secret beyond the GITHUB_TOKEN login below.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "rust/**"
+      - "rust-ebpf/**"
+      - "elixir/**"
+      - "docker-bake.hcl"
+      - "ci/**"
+      - ".github/workflows/build.yml"
+  pull_request:
+    paths:
+      - "rust/**"
+      - "rust-ebpf/**"
+      - "elixir/**"
+      - "docker-bake.hcl"
+      - "ci/**"
+      - ".github/workflows/build.yml"
+  # Monday 04:00 UTC: after Dependabot's Monday run, clear of kured's Sunday
+  # window. A rebuild from the same pinned bases still takes the week's Debian
+  # security fixes (`apt-get upgrade` in each Dockerfile) and moves the tags.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Push and tag only from main, never from a pull request or a manual run on
+  # another branch.
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.group }} (linux/${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [rust, elixir]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    env:
+      GROUP: ${{ matrix.group }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.74.0
+
+      # No layer cache on purpose: every build starts from the pinned bases,
+      # so it always carries the current Debian packages, and a stale cached
+      # `apt-get upgrade` layer can never be what Trivy passes.
+      - name: Build and load
+        run: |
+          docker buildx bake "$GROUP" --progress=plain \
+            --set "*.platform=linux/${ARCH}" \
+            --provenance=false --sbom=false \
+            --load
+
+      - name: Smoke test
+        run: ci/smoke.sh "$GROUP"
+
+      - name: Scan (report HIGH/CRITICAL, fail on fixable CRITICAL)
+        run: ci/scan.sh "$GROUP"
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Same builder, same inputs: every layer comes from the build above, so
+      # what is pushed is what was smoke-tested and scanned. A separate, short
+      # invocation also keeps the registry session fresh (moby/buildkit#6422).
+      # PUSH_BY_DIGEST: untagged push to each image's repository (see
+      # docker-bake.hcl); the publish job tags the merged index.
+      - name: Push by digest
+        if: env.PUBLISH == 'true'
+        env:
+          PUSH_BY_DIGEST: "true"
+        run: |
+          meta="${RUNNER_TEMP}/bake-meta.json"
+          docker buildx bake "$GROUP" --progress=plain \
+            --set "*.platform=linux/${ARCH}" \
+            --provenance=mode=max --sbom=true \
+            --metadata-file "$meta"
+          mkdir -p "${RUNNER_TEMP}/digests"
+          jq -r 'to_entries[]
+                 | select((.value | type) == "object" and (.value | has("containerimage.digest")))
+                 | "\(.key) \(.value["containerimage.digest"])"' "$meta" |
+            while read -r target digest; do
+              echo "${target} linux/${ARCH} ${digest}"
+              echo "$digest" > "${RUNNER_TEMP}/digests/${target}-${ARCH}"
+            done
+
+      - name: Upload digests
+        if: env.PUBLISH == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digests-${{ matrix.group }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish multi-arch tags
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digests-*
+          path: ${{ runner.temp }}/digests
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create and verify tags
+        run: ci/publish.sh "${RUNNER_TEMP}/digests"

@@ -1,0 +1,45 @@
+version: 2
+updates:
+  # Upstream bases, pinned by digest in rust/ and elixir/. rust-ebpf/ builds
+  # FROM the rust-builder of the same run, so it has nothing to bump.
+  # Weekly, Monday 02:00 UTC, ahead of the 04:00 scheduled build.
+  - package-ecosystem: docker
+    directories:
+      - "/rust"
+      - "/elixir"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "02:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    ignore:
+      # Versions move by hand, never by drift: the tag names them, and the
+      # guard in each Dockerfile fails if the FROM line and docker-bake.hcl
+      # disagree. Same-tag digest refreshes (upstream security rebuilds) stay
+      # eligible. See README.md, "Bumping Rust" and "Bumping Elixir or OTP".
+      - dependency-name: "rust"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+      - dependency-name: "hexpm/elixir"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+    groups:
+      base-images:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "02:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]
